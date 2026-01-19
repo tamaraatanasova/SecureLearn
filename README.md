@@ -71,3 +71,67 @@ This hybrid approach increases resistance against **deepfake and presentation at
 - **Face Recognition:** Face embeddings (face-api.js compatible)
 
 ### Components
+frontend/ # React application
+backend/liveness/ # FastAPI liveness detection service
+database/ # PostgreSQL / Supabase schema
+docs/ # Academic documentation
+
+---
+
+## 🗄️ Database Design (Supabase)
+
+### Core Security Tables
+- `face_embeddings` – stored biometric templates (embeddings)
+- `face_login_attempts` – audit log for face recognition attempts
+- `liveness_checks` – liveness detection results (status, score, challenge)
+
+### Educational Domain
+- courses, modules, lessons
+- enrollments, lesson_progress
+- tests, test_attempts, questions
+
+The database design supports **auditability, traceability, and forensic analysis**.
+
+---
+
+## 📊 Standards & Guidelines
+
+This project aligns with:
+- **ISO/IEC 30107-3** – Presentation Attack Detection (PAD)
+- **OWASP Authentication Security Guidelines**
+- Research on biometric anti-spoofing and deepfake detection
+
+---
+
+## ⚠️ Disclaimer
+
+This project is developed for **educational and research purposes only**.
+
+It is **not intended for production use** without:
+- extensive security hardening
+- privacy impact assessment
+- bias and fairness evaluation
+- legal compliance review (GDPR / biometric data laws)
+
+---
+
+## 👩‍🎓 Academic Context
+
+- Course: *Machine Learning and Computer Security*
+- Topic: *Biometric Authentication & Deepfake-Resistant Systems*
+- Focus: Security, liveness detection, database auditing, ML-based defenses
+
+---
+
+## 🚀 Future Improvements
+- Model-based deepfake classification (CNN-based PAD)
+- Infrared / depth camera support
+- Adaptive challenge selection
+- Risk-based authentication scoring
+- Hardware-backed camera verification
+
+
+---
+
+## ✨ Author
+Developed as part of an academic project in cybersecurity and machine learning.
