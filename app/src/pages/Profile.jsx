@@ -143,7 +143,7 @@ export default function Profile() {
     while (samples < 25) {
       const detection = await faceapi
         .detectSingleFace(videoRef.current, detectorOptions)
-        .withFaceLandmarks(true);
+        .withFaceLandmarks(false);
 
       if (detection) {
         const ear = getEar(detection.landmarks);
@@ -177,10 +177,17 @@ export default function Profile() {
         return;
       }
 
-      const detection = await faceapi
-        .detectSingleFace(videoRef.current, detectorOptions)
-        .withFaceLandmarks(true)
-        .withFaceDescriptor();
+      let detection = null;
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        detection = await faceapi
+          .detectSingleFace(videoRef.current, detectorOptions)
+          .withFaceLandmarks(false)
+          .withFaceDescriptor();
+        if (detection) break;
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
 
       if (!detection) {
         setError(t("faceNotFound"));

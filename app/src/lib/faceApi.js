@@ -13,7 +13,8 @@ export const ensureFaceModelsLoaded = async ({ modelUrl = "/models" } = {}) => {
     modelsPromise = (async () => {
       const faceapi = await getFaceApi();
       await faceapi.nets.tinyFaceDetector.loadFromUri(modelUrl);
-      await faceapi.nets.faceLandmark68TinyNet.loadFromUri(modelUrl);
+      // Use the full 68-landmark model to match the shipped weights in `public/models`.
+      await faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl);
       await faceapi.nets.faceRecognitionNet.loadFromUri(modelUrl);
       return true;
     })();
@@ -27,6 +28,6 @@ export const preloadFaceModels = () => {
 
 export const createDetectorOptions = async () => {
   const faceapi = await getFaceApi();
-  return new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 });
+  // Slightly larger input size and lower threshold reduces false "no face detected" rejects.
+  return new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
 };
-

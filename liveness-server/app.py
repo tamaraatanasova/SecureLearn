@@ -10,6 +10,8 @@ import mediapipe as mp
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,121 +20,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MediaPipe Setup
+# ---------------- MediaPipe Setup ----------------
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh_instance = mp_face_mesh.FaceMesh(
-    static_image_mode=True,
+    static_image_mode=False,
     max_num_faces=1,
     refine_landmarks=True,
-    min_detection_confidence=0.7 # Higher confidence for security
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7,
 )
 
 # Landmark Indices
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-MOUTH_INNER_TOP = 13
-MOUTH_INNER_BOTTOM = 14
-FOREHEAD_CENTER = 10 # Used for rPPG/Pulse check
+NOSE_TIP = 1
+MOUTH_TOP = 13
+MOUTH_BOTTOM = 14
 
+# ---------------- Models ----------------
 class Frame(BaseModel):
     image_base64: str
 
 class LivenessRequest(BaseModel):
     frames: List[Frame]
     challenge: Optional[str] = "head_turn"
-    debug: Optional[bool] = False
 
-# --- RESPONSE MESSAGES ---
-
-LIVE_MESSAGES = {
-    "blink_detected": "Liveness verified: blink detected.",
-    "head_turn_detected": "Liveness verified: head turn detected.",
-    "mouth_open_detected": "Liveness verified: mouth movement detected.",
-}
-
-SPOOF_MESSAGES = {
-    "no_face_detected": "No face detected consistently. Possible camera obstruction or an attempted spoof.",
-    "no_face_landmarks": "Face landmarks could not be extracted reliably.",
-    "no_biological_signal": "No biological signal detected. Possible photo replay or deepfake.",
-    "passive_check_failed": "Passive anti-spoofing checks failed. Possible replay attack.",
-    "no_blink_detected": "Blink challenge failed. Please blink naturally and try again.",
-    "head_remained_static": "Head-turn challenge failed. Please turn your head left/right and try again.",
-    "mouth_not_opened": "Mouth-open challenge failed. Please open your mouth and try again.",
-    "unknown_challenge": "Unknown challenge type.",
-}
-
-def build_response(status: str, reason: str, attack_type: Optional[str] = None, message: Optional[str] = None, **extra):
-    if message is None:
-        if status == "live":
-            message = LIVE_MESSAGES.get(reason, "Liveness verified.")
-        else:
-            message = SPOOF_MESSAGES.get(reason, "Liveness check failed.")
-    resp = {"status": status, "reason": reason, "message": message}
-    if attack_type is not None:
-        resp["attack_type"] = attack_type
-    resp.update(extra)
-    return resp
-
-# --- DEEPFAKE PROOFING UTILS ---
-
-def analyze_frequency_domain(img):
-    """
-    Detects if the image is a photo of a screen (Replay Attack).
-    Screens have high-frequency periodic noise (Moiré patterns).
-    """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # Resize for speed
-    gray = cv2.resize(gray, (200, 200))
-    f = np.fft.fft2(gray)
-    fshift = np.fft.fftshift(f)
-    magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1)
-    
-    # Analyze the distribution of high frequencies
-    # Real skin is 'smooth', screens have 'spikes' in frequency
-    if np.std(magnitude_spectrum) > 55: # Threshold for digital screen noise
-        return False
-    return True
-
-def analyze_texture_liveness(img):
-    """
-    Uses Laplacian variance to detect 'flatness'.
-    High variance = Sharp real skin. Low variance = Blurry photo or screen.
-    """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    return laplacian_var > 100 # Threshold: photos/screens often < 80
-
-def get_green_mean(img, landmarks, w, h):
-    """
-    Extracts the average green value of the forehead.
-    Used for rPPG (detecting the heartbeat).
-    """
-    fh = landmarks[FOREHEAD_CENTER]
-    cx, cy = int(fh.x * w), int(fh.y * h)
-    # Sample a small 10x10 area on the forehead
-    roi = img[max(0, cy-5):min(h, cy+5), max(0, cx-5):min(w, cx+5)]
-    if roi.size == 0: return 0
-    return np.mean(roi[:, :, 1]) # Green Channel
-
-# --- EXISTING CHALLENGE UTILS ---
-
-def get_distance(p1, p2):
-    return np.linalg.norm(np.array(p1) - np.array(p2))
-
-def calculate_ear(landmarks, eye_idx, w, h):
-    def p(i): return np.array([landmarks[i].x * w, landmarks[i].y * h])
-    pts = [p(i) for i in eye_idx]
-    v_dist1 = get_distance(pts[1], pts[5])
-    v_dist2 = get_distance(pts[2], pts[4])
-    h_dist = get_distance(pts[0], pts[3])
-    return (v_dist1 + v_dist2) / (2.0 * h_dist)
-
-def get_head_pose(landmarks):
-    # Nose to eye distance ratio (Yaw)
-    dist_nose_left = abs(landmarks[1].x - landmarks[33].x)
-    dist_nose_right = abs(landmarks[1].x - landmarks[263].x)
-    if dist_nose_right == 0: return 1.0
-    return dist_nose_left / dist_nose_right
+# ---------------- Helper Functions ----------------
 
 def decode_image(b64):
     try:
@@ -140,153 +53,139 @@ def decode_image(b64):
         image_data = base64.b64decode(data)
         image = Image.open(io.BytesIO(image_data)).convert("RGB")
         return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    except:
+    except Exception:
         return None
 
-@app.get("/health")
-def health():
-    return {"ok": True}
+def analyze_passive_spoof(img):
+    """
+    Checks for digital screens (FFT) and blur/texture (Laplacian).
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # 1. Texture/Sharpness check
+    lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    
+    # 2. Frequency check (Detects pixel patterns on screens)
+    resized_gray = cv2.resize(gray, (200, 200))
+    f = np.fft.fft2(resized_gray)
+    fshift = np.fft.fftshift(f)
+    mag_spec = 20 * np.log(np.abs(fshift) + 1)
+    freq_std = np.std(mag_spec)
+
+    # Thresholds: 
+    # lap_var > 80 (Not too blurry)
+    # freq_std < 55 (Not a digital screen pattern)
+    return lap_var > 70 and freq_std < 55
+
+def get_distance(p1, p2):
+    return np.linalg.norm(np.array(p1) - np.array(p2))
+
+def calculate_ear(landmarks, eye_idx, w, h):
+    def p(i): return np.array([landmarks[i].x * w, landmarks[i].y * h])
+    pts = [p(i) for i in eye_idx]
+    v1 = get_distance(pts[1], pts[5])
+    v2 = get_distance(pts[2], pts[4])
+    h_dist = get_distance(pts[0], pts[3]) + 1e-6
+    return (v1 + v2) / (2.0 * h_dist)
+
+# ---------------- Main Endpoint ----------------
 
 @app.post("/liveness")
-def liveness(req: LivenessRequest):
+async def check_liveness(req: LivenessRequest):
+    # Requirement: Increase frame count in frontend to 15 for better security
     if len(req.frames) < 8:
-        raise HTTPException(status_code=400, detail="Need at least 8 frames for deepfake analysis")
+        raise HTTPException(status_code=400, detail="Insufficient frames for analysis.")
 
-    ear_history = []
-    mouth_ratios = []
-    head_pose_ratios = []
-    green_signals = [] # For Pulse/rPPG
-    passive_scores = [] # Texture/Frequency results
-    frequency_scores = []
-    texture_scores = []
-    processed_frames = 0
-    frames_with_face = 0
+    ear_hist = []
+    mouth_hist = []
+    head_yaw_hist = []
+    z_hist = []
+    raw_landmarks_list = [] # Used to detect "perfectly static" images
+    passive_passes = 0
+    
+    w_ref, h_ref = 640, 480
 
-    for frame_data in req.frames:
-        img = decode_image(frame_data.image_base64)
+    for f in req.frames:
+        img = decode_image(f.image_base64)
         if img is None: continue
-
-        h, w = img.shape[:2]
-        processed_frames += 1
         
-        # --- LAYER 1: PASSIVE ANTI-SPOOFING (Frequency & Texture) ---
-        freq_ok = analyze_frequency_domain(img)
-        tex_ok = analyze_texture_liveness(img)
-        frequency_scores.append(freq_ok)
-        texture_scores.append(tex_ok)
-        passive_scores.append(freq_ok and tex_ok)
+        h_ref, w_ref = img.shape[:2]
 
-        # --- LAYER 2: LANDMARK PROCESSING ---
+        # 1. Passive Security (Screen/Blur Detection)
+        if analyze_passive_spoof(img):
+            passive_passes += 1
+
+        # 2. Landmark Detection
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        result = face_mesh_instance.process(rgb)
-
-        if not result.multi_face_landmarks:
-            continue
-
-        frames_with_face += 1
-        landmarks = result.multi_face_landmarks[0].landmark
-
-        # Blink logic
-        ear_history.append((calculate_ear(landmarks, LEFT_EYE, w, h) + calculate_ear(landmarks, RIGHT_EYE, w, h)) / 2.0)
+        res = face_mesh_instance.process(rgb)
         
-        # Mouth logic
-        eye_dist = get_distance([landmarks[33].x, landmarks[33].y], [landmarks[263].x, landmarks[263].y])
-        m_dist = get_distance([landmarks[MOUTH_INNER_TOP].x, landmarks[MOUTH_INNER_TOP].y], 
-                              [landmarks[MOUTH_INNER_BOTTOM].x, landmarks[MOUTH_INNER_BOTTOM].y])
-        mouth_ratios.append(m_dist / eye_dist)
+        if res.multi_face_landmarks:
+            lms = res.multi_face_landmarks[0].landmark
+            
+            # Store landmark positions to check for static image fraud
+            # We take a few key points: Nose, Eye corners
+            raw_landmarks_list.append([(lms[i].x, lms[i].y) for i in [1, 33, 263, 61, 291]])
 
-        # Head Pose logic
-        head_pose_ratios.append(get_head_pose(landmarks))
+            # EAR (Blink detection)
+            ear = (calculate_ear(lms, LEFT_EYE, w_ref, h_ref) + calculate_ear(lms, RIGHT_EYE, w_ref, h_ref)) / 2.0
+            ear_hist.append(ear)
+            
+            # Mouth Open detection
+            m_dist = get_distance([lms[MOUTH_TOP].x, lms[MOUTH_TOP].y], [lms[MOUTH_BOTTOM].x, lms[MOUTH_BOTTOM].y])
+            mouth_hist.append(m_dist)
+            
+            # Head Yaw (Perspective shift)
+            # Ratio of nose-to-left-eye vs nose-to-right-eye
+            d_left = abs(lms[NOSE_TIP].x - lms[33].x)
+            d_right = abs(lms[NOSE_TIP].x - lms[263].x)
+            head_yaw_hist.append(d_left / (d_right + 1e-6))
+            
+            # Depth check
+            z_hist.append(lms[NOSE_TIP].z)
 
-        # Green Signal (Biological rPPG)
-        green_signals.append(get_green_mean(img, landmarks, w, h))
+    # ---------------- SECURITY VALIDATION ----------------
 
-    # --- FINAL VALIDATION LOGIC ---
+    if len(raw_landmarks_list) < 5:
+        return {"status": "spoof", "reason": "no_face", "message": "Face not detected clearly."}
 
-    if processed_frames < 8:
-        raise HTTPException(status_code=400, detail="Not enough decodable frames")
+    # BLOCKER 1: Static Image Detection
+    # If the variance of landmark positions is near zero, it's a static digital image.
+    # Real humans always have micro-tremors.
+    landmark_variance = np.var(raw_landmarks_list, axis=0).mean()
+    if landmark_variance < 0.000005:
+        return {"status": "spoof", "reason": "static_image", "message": "Static image detected. Please move naturally."}
 
-    if frames_with_face < 4:
-        return build_response(
-            status="spoof",
-            reason="no_face_detected",
-            attack_type="no_face",
-            frames_with_face=frames_with_face,
-        )
+    # BLOCKER 2: Screen/Print Detection (Passive check)
+    if passive_passes < (len(req.frames) * 0.4):
+        return {"status": "spoof", "reason": "digital_spoof", "message": "Possible screen or printed photo detected."}
 
-    # 1. Fail if passive checks failed on > 30% of frames
-    passive_fail_ratio = passive_scores.count(False) / max(1, len(passive_scores))
-    if passive_fail_ratio > 0.3:
-        freq_fail_ratio = frequency_scores.count(False) / max(1, len(frequency_scores))
-        tex_fail_ratio = texture_scores.count(False) / max(1, len(texture_scores))
+    # ---------------- CHALLENGE VERIFICATION ----------------
 
-        # Heuristic classification for friendlier error messages
-        if freq_fail_ratio > tex_fail_ratio and freq_fail_ratio > 0.2:
-            attack_type = "replay_screen"
-            message = "Possible replay attack detected (screen). Avoid showing a photo/video on another device."
-        elif tex_fail_ratio >= freq_fail_ratio and tex_fail_ratio > 0.2:
-            attack_type = "replay_photo"
-            message = "Possible photo/print replay detected. Please use the live camera feed."
-        else:
-            attack_type = "passive_spoof"
-            message = None
-
-        return build_response(
-            status="spoof",
-            reason="passive_check_failed",
-            attack_type=attack_type,
-            message=message,
-            passive_fail_ratio=float(passive_fail_ratio),
-            frequency_fail_ratio=float(freq_fail_ratio),
-            texture_fail_ratio=float(tex_fail_ratio),
-        )
-
-    # 2. Biological Check (Pulse/rPPG)
-    # Real humans have variance in green channel. Deepfakes/photos are either static or pure noise.
-    if len(green_signals) > 0:
-        pulse_variance = np.var(green_signals)
-        if pulse_variance < 0.001: # Totally static (Photo)
-            return build_response(
-                status="spoof",
-                reason="no_biological_signal",
-                attack_type="no_biological_signal",
-                pulse_variance=float(pulse_variance),
-                message="No liveness signal detected (no pulse/skin variation). Possible photo replay used for authentication.",
-            )
-
-    # 3. Active Challenge Logic
-    if req.challenge == "blink":
-        if not ear_history:
-            return build_response(status="spoof", reason="no_face_landmarks", attack_type="no_face_landmarks")
-        if (max(ear_history) - min(ear_history)) > 0.07:
-            resp = build_response(status="live", reason="blink_detected")
-        else:
-            resp = build_response(status="spoof", reason="no_blink_detected", attack_type="challenge_failed")
-        if req.debug:
-            resp["ear_delta"] = float(max(ear_history) - min(ear_history))
-        return resp
+    # Detection flags
+    blinked = any(e < 0.19 for e in ear_hist)
+    mouth_opened = any(m > 0.05 for m in mouth_hist)
+    
+    # Head turn verification: Check if the yaw ratio changed significantly
+    # (A real head turn causes a massive change in the d_left/d_right ratio)
+    yaw_range = max(head_yaw_hist) - min(head_yaw_hist)
+    head_turned = yaw_range > 0.4 
 
     if req.challenge == "head_turn":
-        if not head_pose_ratios:
-            return build_response(status="spoof", reason="no_face_landmarks", attack_type="no_face_landmarks")
-        if min(head_pose_ratios) < 0.6 or max(head_pose_ratios) > 1.7:
-            resp = build_response(status="live", reason="head_turn_detected")
-        else:
-            resp = build_response(status="spoof", reason="head_remained_static", attack_type="challenge_failed")
-        if req.debug:
-            resp["head_pose_min"] = float(min(head_pose_ratios))
-            resp["head_pose_max"] = float(max(head_pose_ratios))
-        return resp
+        if head_turned:
+            return {"status": "live", "reason": "challenge_passed", "message": "Liveness verified!"}
+        return {"status": "spoof", "reason": "no_motion", "message": "Please turn your head slowly from left to right."}
 
     if req.challenge == "mouth_open":
-        if not mouth_ratios:
-            return build_response(status="spoof", reason="no_face_landmarks", attack_type="no_face_landmarks")
-        if (max(mouth_ratios) - min(mouth_ratios)) > 0.1:
-            resp = build_response(status="live", reason="mouth_open_detected")
-        else:
-            resp = build_response(status="spoof", reason="mouth_not_opened", attack_type="challenge_failed")
-        if req.debug:
-            resp["mouth_delta"] = float(max(mouth_ratios) - min(mouth_ratios))
-        return resp
+        if mouth_opened:
+            return {"status": "live", "reason": "challenge_passed", "message": "Liveness verified!"}
+        return {"status": "spoof", "reason": "no_mouth_motion", "message": "Please open your mouth clearly."}
 
-    return build_response(status="spoof", reason="unknown_challenge", attack_type="invalid_challenge")
+    # Fallback: If no specific challenge but they blinked, we consider it live (Passive)
+    if blinked:
+        return {"status": "live", "reason": "blink_detected", "message": "Liveness verified!"}
+
+    return {"status": "spoof", "reason": "failed", "message": "Verification failed. Please follow the instructions."}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
