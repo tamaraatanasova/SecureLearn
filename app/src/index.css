@@ -1,0 +1,5 @@
+@import "./styles/theme.css";
+
+:root {
+  color-scheme: light dark;
+}
