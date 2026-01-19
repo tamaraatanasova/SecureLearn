@@ -134,4 +134,5 @@ It is **not intended for production use** without:
 ---
 
 ## ✨ Author
-Developed as part of an academic project in cybersecurity and machine learning.
+**Tamara Atanasova**  
+Master’s Student in Cyber Security
